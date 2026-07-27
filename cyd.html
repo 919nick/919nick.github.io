@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Roll Chart — Field Test</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: #000; overflow: hidden;
+    font-family: -apple-system, Roboto, 'Segoe UI', system-ui, sans-serif;
+    -webkit-user-select: none; user-select: none; }
+#stage { position: fixed; left: 0; top: 0; right: 0; bottom: 0;
+    display: flex; align-items: center; justify-content: center;
+    touch-action: none; }
+canvas#screen { image-rendering: pixelated; image-rendering: crisp-edges; background: #000; }
+
+.overlay { position: fixed; left: 0; top: 0; right: 0; bottom: 0; display: none;
+    flex-direction: column; z-index: 5; }
+.overlay.show { display: flex; }
+#sleepOverlay { background: #000; opacity: .98; z-index: 6; }
+#optionsOverlay { background: #f5f2e8; }
+.opt-btn { flex: 1; display: flex; align-items: center; justify-content: center;
+    font-size: 7vh; font-weight: 700; color: #1a1a2e;
+    border-bottom: 2px solid rgba(26,26,46,.2); }
+.opt-btn:active { background: #1a1a2e; color: #f5f2e8; }
+#qrOverlay { background: #fff; align-items: center; justify-content: center; }
+#qrBox img, #qrBox canvas { width: 62vh !important; height: 62vh !important; }
+#qrCaption { color: #111; font-size: 4.5vh; font-weight: 600; margin-top: 2vh; }
+#setupOverlay { background: #10131f; color: #fff; overflow-y: auto; }
+.set-row { display: flex; align-items: center; justify-content: space-between;
+    padding: 3vh 4vw; border-bottom: 1px solid rgba(255,255,255,.12);
+    font-size: 5vh; font-weight: 600; }
+.set-row:active { background: rgba(102,126,234,.25); }
+.set-row .val { color: #a5b4fc; font-weight: 700; }
+#splash { background: #10131f; align-items: center; justify-content: center;
+    gap: 3vh; color: #fff; text-align: center; z-index: 7; }
+#splash h1 { font-size: 6vh; }
+#splash p { font-size: 3.6vh; opacity: .7; max-width: 80vw; line-height: 1.5; }
+#splash .go { font-size: 5.5vh; font-weight: 700; background: #667eea;
+    padding: 2.5vh 8vw; border-radius: 99px; }
+#toastEl { position: fixed; left: 50%; bottom: 6vh; transform: translateX(-50%);
+    background: #1a1a2e; color: #f5f2e8; font-size: 4vh; font-weight: 600;
+    padding: 1.5vh 5vw; border-radius: 99px; opacity: 0; transition: opacity .2s;
+    pointer-events: none; white-space: nowrap; z-index: 9; }
+#toastEl.show { opacity: .95; }
+input[type=file] { display: none; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="screen" width="320" height="240"></canvas></div>
+
+<div class="overlay" id="optionsOverlay">
+    <div class="opt-btn" data-act="qr">&#9635; QR to this cue</div>
+    <div class="opt-btn" data-act="zero">&#8634; Zero trip here</div>
+    <div class="opt-btn" data-act="setup">&#9881; Setup</div>
+    <div class="opt-btn" data-act="back">&larr; Back</div>
+</div>
+
+<div class="overlay" id="qrOverlay">
+    <div id="qrBox"></div>
+    <div id="qrCaption">tap to close</div>
+</div>
+
+<div class="overlay" id="setupOverlay">
+    <div class="set-row" id="rowFile">Load route file <span class="val">&#8250;</span></div>
+    <div class="set-row" id="rowUrl">Load from URL <span class="val" id="urlVal">&#8250;</span></div>
+    <div class="set-row" id="rowSleep">Sleep timeout <span class="val" id="sleepVal">30s</span></div>
+    <div class="set-row" id="rowMaps">QR maps app <span class="val" id="mapsVal">Apple</span></div>
+    <div class="set-row" id="rowFit">Display <span class="val" id="fitVal">Fit 4:3</span></div>
+    <div class="set-row" id="rowReset">Reset chart position <span class="val">&#8250;</span></div>
+    <div class="set-row" id="rowClose">Close setup <span class="val">&larr;</span></div>
+</div>
+
+<div class="overlay show" id="splash">
+    <h1>Roll Chart Field Test</h1>
+    <p>Right &frac23; tap = next &middot; left &frac13; = previous<br>
+       long-press = options &middot; wake tap never advances</p>
+    <div class="go">TAP TO START FULLSCREEN</div>
+</div>
+
+<div class="overlay" id="sleepOverlay"></div>
+
+<div id="toastEl"></div>
+<input type="file" id="jsonFile" accept=".json">
+
+<script>
+'use strict';
+// ---------------- settings & state (persisted) -------------------------
+var store;
+try { window.localStorage.setItem('_t','1'); window.localStorage.removeItem('_t'); store = window.localStorage; }
+catch (e) { var _m = {}; store = { getItem: function(k){ return _m[k] || null; }, setItem: function(k,v){ _m[k]=v; } }; }
+
+var SLEEP_STEPS = [0, 15, 30, 60, 120];
+var cfg = { sleep: 30, maps: 'apple', fit: true, url: '' };
+try { var s = JSON.parse(store.getItem('ft_cfg') || 'null'); if (s) cfg = s; } catch (e) {}
+
+var route = null, idx = 0, offsetMi = 0, asleep = false, sleepTimer = null;
+
+var DEMO = { routeName: "Demo — Danbury Loop", totalMiles: 34.1, cues: [
+ { seq:1, type:"depart", text:"NC-8 N / NC-89 W", distFromPrev:0, cumulative:0, lat:36.4097, lon:-80.2061 },
+ { seq:2, type:"left", text:"NC-268 W", distFromPrev:6.69, cumulative:6.69, lat:36.4419, lon:-80.3138 },
+ { seq:3, type:"right", text:"NC-66 S", compound:["then quick left onto NC-66 S"], distFromPrev:3.83, cumulative:10.52, lat:36.4653, lon:-80.3771, note:"staggered crossroads" },
+ { seq:4, type:"straight", text:"NC-268 W", distFromPrev:0.06, cumulative:10.58, lat:36.4655, lon:-80.3779, verify:true },
+ { seq:5, type:"caution", text:"!! 120\u00b0 right curve", distFromPrev:4.1, cumulative:14.68, lat:36.4922, lon:-80.4433 },
+ { seq:6, type:"ramp", text:"US-52 N", distFromPrev:6.1, cumulative:20.78, lat:36.4488, lon:-80.6003, note:"gas at ramp" },
+ { seq:7, type:"exit", text:"Exit 18: I-74 W", distFromPrev:4.35, cumulative:25.13, lat:36.4991, lon:-80.6221 },
+ { seq:8, type:"sharp-left", text:"NC-18 S", distFromPrev:6.9, cumulative:32.03, lat:36.5203, lon:-80.7415 },
+ { seq:9, type:"arrive", text:"Arrive", distFromPrev:2.1, cumulative:34.13, lat:36.5305, lon:-80.7622 }
+]};
+
+// ---------------- canvas scale (fit 4:3 or fill) -----------------------
+var cv = document.getElementById('screen');
+var ctx = cv.getContext('2d');
+function layout() {
+    var W = window.innerWidth, H = window.innerHeight;
+    if (cfg.fit) {
+        var s = Math.min(W / 320, H / 240);
+        cv.style.width = Math.floor(320 * s) + 'px';
+        cv.style.height = Math.floor(240 * s) + 'px';
+    } else {
+        cv.style.width = W + 'px';
+        cv.style.height = H + 'px';
+    }
+}
+window.addEventListener('resize', layout);
+
+// ---------------- rendering (same vocabulary as builder/sim) -----------
+var INK = '#1a1a2e', PAPER = '#f5f2e8', ACCENT = '#c0392b', AMBER = '#8a5a00';
+function draw() {
+    var c = route.cues[idx];
+    ctx.fillStyle = PAPER; ctx.fillRect(0, 0, 320, 240);
+    ctx.fillStyle = INK; ctx.fillRect(0, 0, 320, 24);
+    ctx.fillStyle = PAPER; ctx.font = 'bold 13px sans-serif';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(trim(route.routeName || 'Route', 30), 6, 13);
+    ctx.textAlign = 'right';
+    ctx.fillText((idx + 1) + '/' + route.cues.length, 314, 13);
+
+    ctx.strokeStyle = INK; ctx.lineWidth = 2;
+    ctx.strokeRect(8, 34, 96, 96);
+    drawGlyph(c.type || 'straight', 56, 82, 36);
+
+    if (c.verify) {
+        ctx.fillStyle = ACCENT; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillText('VERIFY', 10, 146);
+    }
+
+    ctx.fillStyle = INK; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    var size = 26;
+    var lines = wrapText(c.text || '', size, 196);
+    while (lines.length > 2 && size > 15) { size -= 2; lines = wrapText(c.text, size, 196); }
+    ctx.font = 'bold ' + size + 'px sans-serif';
+    for (var k = 0; k < Math.min(lines.length, 2); k++) ctx.fillText(lines[k], 112, 60 + k * (size + 4));
+
+    var y = 60 + Math.min(lines.length, 2) * (size + 4);
+    ctx.font = '13px sans-serif';
+    (c.compound || []).slice(0, 2).forEach(function(s2) { ctx.fillText('\u21b3 ' + trim(s2, 26), 112, y); y += 16; });
+    if (c.note) {
+        ctx.fillStyle = AMBER; ctx.font = 'italic 14px sans-serif';
+        ctx.fillText(trim(c.note, 26), 112, y + 4);
+    }
+
+    var rel = (c.cumulative || 0) - offsetMi;
+    ctx.fillStyle = INK;
+    ctx.font = 'bold 52px monospace'; ctx.textAlign = 'right';
+    ctx.fillText(rel.toFixed(1), 312, 226);
+    ctx.font = 'bold 14px sans-serif';
+    ctx.fillText('mi', 312, 190);
+    if (offsetMi !== 0) {
+        ctx.fillStyle = ACCENT; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'left';
+        ctx.fillText('\u0394 zeroed @ ' + offsetMi.toFixed(1), 8, 226);
+    }
+    var nxt = route.cues[idx + 1];
+    if (nxt) {
+        ctx.fillStyle = INK; ctx.font = '13px sans-serif'; ctx.textAlign = 'left';
+        ctx.fillText('next +' + (nxt.distFromPrev || 0).toFixed(1), 8, 206);
+    }
+}
+function trim(s, n) { s = String(s); return s.length > n ? s.slice(0, n - 1) + '\u2026' : s; }
+function wrapText(text, size, maxW) {
+    ctx.font = 'bold ' + size + 'px sans-serif';
+    var words = String(text).split(' '), lines = [], cur = '';
+    for (var i = 0; i < words.length; i++) {
+        var t = cur ? cur + ' ' + words[i] : words[i];
+        if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+        else cur = t;
+    }
+    if (cur) lines.push(cur);
+    return lines;
+}
+var ROT = { depart:0, straight:0, left:-90, right:90, 'sharp-left':-135, 'sharp-right':135,
+    'slight-left':-45, 'slight-right':45, 'keep-left':-30, 'keep-right':30, uturn:180 };
+function drawGlyph(key, cx, cy, r) {
+    ctx.save(); ctx.translate(cx, cy);
+    ctx.strokeStyle = INK; ctx.fillStyle = INK;
+    ctx.lineWidth = 7; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    function head(x, y, a, hl) {
+        ctx.beginPath();
+        ctx.moveTo(x, y); ctx.lineTo(x - hl * Math.cos(a - .5), y - hl * Math.sin(a - .5));
+        ctx.moveTo(x, y); ctx.lineTo(x - hl * Math.cos(a + .5), y - hl * Math.sin(a + .5));
+        ctx.stroke();
+    }
+    function arrow(x1, y1, x2, y2, hl) {
+        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+        head(x2, y2, Math.atan2(y2 - y1, x2 - x1), hl);
+    }
+    if (key === 'arrive') {
+        ctx.beginPath(); ctx.arc(0, 0, r * .8, 0, 7); ctx.stroke();
+        ctx.fillStyle = ACCENT; ctx.beginPath(); ctx.arc(0, 0, r * .3, 0, 7); ctx.fill();
+    } else if (key === 'roundabout') {
+        ctx.beginPath(); ctx.arc(0, r * .25, r * .55, 0, 7); ctx.stroke();
+        arrow(0, r * -.3, 0, -r, r * .3);
+    } else if (key === 'ramp' || key === 'merge') {
+        ctx.beginPath(); ctx.moveTo(-r * .45, r);
+        ctx.quadraticCurveTo(-r * .45, 0, r * .5, -r * .55); ctx.stroke();
+        head(r * .5, -r * .55, -0.62, r * .3);
+    } else if (key === 'exit') {
+        ctx.beginPath(); ctx.moveTo(-r * .2, r); ctx.lineTo(-r * .2, -r * .9); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(-r * .2, r * .1);
+        ctx.quadraticCurveTo(r * .3, 0, r * .65, -r * .5); ctx.stroke();
+        head(r * .65, -r * .5, -0.72, r * .28);
+    } else if (String(key).indexOf('caution') === 0) {
+        ctx.strokeStyle = ACCENT;
+        ctx.beginPath(); ctx.moveTo(0, -r); ctx.lineTo(r, r * .75); ctx.lineTo(-r, r * .75);
+        ctx.closePath(); ctx.stroke();
+        ctx.fillStyle = INK; ctx.font = 'bold ' + Math.round(r * .9) + 'px sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('!!', 0, r * .18);
+    } else {
+        var rot = (ROT[key] !== undefined ? ROT[key] : 0) * Math.PI / 180;
+        ctx.rotate(rot);
+        arrow(0, r, 0, -r, r * .42);
+    }
+    ctx.restore();
+}
+
+// ---------------- interaction ------------------------------------------
+var stage = document.getElementById('stage');
+var optOv = document.getElementById('optionsOverlay');
+var qrOv = document.getElementById('qrOverlay');
+var setOv = document.getElementById('setupOverlay');
+var sleepOv = document.getElementById('sleepOverlay');
+var splash = document.getElementById('splash');
+
+var downT = 0, lpTimer = null, suppressTap = false, flashing = false;
+
+stage.addEventListener('pointerdown', function(e) {
+    e.preventDefault();
+    downT = performance.now();
+    suppressTap = false;
+    lpTimer = setTimeout(function() { suppressTap = true; onLongPress(); }, 600);
+});
+stage.addEventListener('pointerup', function(e) {
+    clearTimeout(lpTimer);
+    if (suppressTap) return;
+    var dur = performance.now() - downT;
+    if (dur < 45) return; // phantom filter
+    onTap(e.clientX);
+});
+stage.addEventListener('pointercancel', function() { clearTimeout(lpTimer); });
+
+function onTap(clientX) {
+    pokeSleep();
+    if (wakeIfAsleep()) return;                       // wake tap never advances
+    var fx = clientX / window.innerWidth;
+    if (fx < 0.33) prevCue(); else nextCue();
+}
+function onLongPress() {
+    pokeSleep();
+    if (wakeIfAsleep()) return;
+    optOv.classList.add('show');
+}
+
+// QR overlay: tap closes
+qrOv.addEventListener('pointerup', function() { qrOv.classList.remove('show'); pokeSleep(); });
+
+// options buttons: never let presses reach the stage
+var optBtns = optOv.querySelectorAll('.opt-btn');
+for (var i = 0; i < optBtns.length; i++) (function(b) {
+    b.addEventListener('pointerdown', function(e) { e.stopPropagation(); clearTimeout(lpTimer); });
+    b.addEventListener('pointerup', function(e) {
+        e.stopPropagation(); clearTimeout(lpTimer); pokeSleep();
+        optOv.classList.remove('show');
+        var act = b.getAttribute('data-act');
+        if (act === 'qr') showQR();
+        else if (act === 'zero') zeroTrip();
+        else if (act === 'setup') setOv.classList.add('show');
+    });
+})(optBtns[i]);
+
+function nextCue() {
+    if (idx < route.cues.length - 1) { idx++; persist(); draw(); }
+    else edgeFlash();
+}
+function prevCue() {
+    if (idx > 0) { idx--; persist(); draw(); }
+    else edgeFlash();
+}
+function edgeFlash() {
+    if (flashing) return;
+    flashing = true;
+    var n = 0;
+    function step() {
+        n++;
+        if (n > 2) { flashing = false; draw(); return; }
+        ctx.fillStyle = INK; ctx.fillRect(0, 0, 320, 240);
+        setTimeout(function() { draw(); setTimeout(step, 80); }, 90);
+    }
+    step();
+}
+function zeroTrip() {
+    offsetMi = route.cues[idx].cumulative || 0;
+    persist(); draw();
+    toast('\u0394 Trip zeroed \u2014 reset bike odo');
+}
+function showQR() {
+    var c = route.cues[idx];
+    var url = cfg.maps === 'apple'
+        ? 'https://maps.apple.com/?daddr=' + c.lat + ',' + c.lon
+        : 'https://www.google.com/maps/dir/?api=1&destination=' + c.lat + ',' + c.lon;
+    var box = document.getElementById('qrBox');
+    box.innerHTML = '';
+    new QRCode(box, { text: url, width: 240, height: 240, correctLevel: QRCode.CorrectLevel.M });
+    document.getElementById('qrCaption').textContent =
+        'Cue ' + (idx + 1) + ' \u2192 ' + (cfg.maps === 'apple' ? 'Apple' : 'Google') + ' Maps \u00b7 tap to close';
+    qrOv.classList.add('show');
+}
+
+// ---------------- sleep -------------------------------------------------
+function pokeSleep() {
+    clearTimeout(sleepTimer);
+    if (cfg.sleep > 0) sleepTimer = setTimeout(goSleep, cfg.sleep * 1000);
+}
+function goSleep() {
+    // don't sleep mid-menu or mid-QR
+    if (optOv.classList.contains('show') || qrOv.classList.contains('show') || setOv.classList.contains('show')) { pokeSleep(); return; }
+    asleep = true;
+    sleepOv.classList.add('show');
+}
+function wakeIfAsleep() {
+    if (!asleep) return false;
+    asleep = false;
+    sleepOv.classList.remove('show');
+    return true;
+}
+sleepOv.addEventListener('pointerup', function() { wakeIfAsleep(); pokeSleep(); });
+
+// ---------------- setup screen ------------------------------------------
+function bind(id, fn) { document.getElementById(id).addEventListener('pointerup', function(e) { e.stopPropagation(); fn(); }); }
+bind('rowFile', function() { document.getElementById('jsonFile').click(); });
+bind('rowUrl', function() {
+    var u = prompt('Route JSON URL (e.g. http://your-server/routes/danbury.json)', cfg.url || '');
+    if (!u) return;
+    cfg.url = u; saveCfg();
+    fetch(u).then(function(r) { return r.json(); }).then(function(j) { applyRoute(j, u); })
+        .catch(function(e) { toast('Load failed: ' + e.message); });
+});
+bind('rowSleep', function() {
+    var at = SLEEP_STEPS.indexOf(cfg.sleep);
+    cfg.sleep = SLEEP_STEPS[(at + 1) % SLEEP_STEPS.length];
+    saveCfg(); refreshSetup(); pokeSleep();
+});
+bind('rowMaps', function() { cfg.maps = cfg.maps === 'apple' ? 'google' : 'apple'; saveCfg(); refreshSetup(); });
+bind('rowFit', function() { cfg.fit = !cfg.fit; saveCfg(); refreshSetup(); layout(); });
+bind('rowReset', function() { idx = 0; offsetMi = 0; persist(); draw(); toast('Chart reset'); });
+bind('rowClose', function() { setOv.classList.remove('show'); pokeSleep(); draw(); });
+function refreshSetup() {
+    document.getElementById('sleepVal').textContent = cfg.sleep === 0 ? 'never' : cfg.sleep + 's';
+    document.getElementById('mapsVal').textContent = cfg.maps === 'apple' ? 'Apple' : 'Google';
+    document.getElementById('fitVal').textContent = cfg.fit ? 'Fit 4:3' : 'Fill screen';
+    document.getElementById('urlVal').textContent = cfg.url ? trim(cfg.url, 18) : '\u203a';
+}
+function saveCfg() { store.setItem('ft_cfg', JSON.stringify(cfg)); }
+
+document.getElementById('jsonFile').addEventListener('change', function() {
+    var f = this.files[0];
+    if (!f) return;
+    var r = new FileReader();
+    r.onload = function() {
+        try { applyRoute(JSON.parse(r.result), f.name); }
+        catch (e) { toast('Bad JSON: ' + e.message); }
+    };
+    r.readAsText(f);
+});
+function applyRoute(j, srcName) {
+    if (!j.cues || !j.cues.length) { toast('No cues in that file'); return; }
+    route = j; idx = 0; offsetMi = 0;
+    store.setItem('ft_route', JSON.stringify(j));
+    persist(); setOv.classList.remove('show'); draw();
+    toast('Loaded: ' + (j.routeName || srcName) + ' (' + j.cues.length + ' cues)');
+}
+
+// ---------------- persistence -------------------------------------------
+function persist() {
+    store.setItem('ft_state', JSON.stringify({ name: route.routeName, idx: idx, offsetMi: offsetMi }));
+}
+function restore() {
+    try {
+        var saved = JSON.parse(store.getItem('ft_route') || 'null');
+        if (saved && saved.cues && saved.cues.length) route = saved;
+    } catch (e) {}
+    try {
+        var st = JSON.parse(store.getItem('ft_state') || 'null');
+        if (st && st.name === route.routeName) {
+            idx = Math.min(st.idx || 0, route.cues.length - 1);
+            offsetMi = st.offsetMi || 0;
+        }
+    } catch (e) {}
+}
+
+// ---------------- toast / splash / boot ----------------------------------
+var toastTimer;
+function toast(msg) {
+    var t = document.getElementById('toastEl');
+    t.textContent = msg; t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function() { t.classList.remove('show'); }, 2200);
+}
+
+splash.addEventListener('pointerup', function() {
+    splash.classList.remove('show');
+    var el = document.documentElement;
+    var rf = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (rf) { try { rf.call(el); } catch (e) {} }
+    setTimeout(function() {
+        if (screen.orientation && screen.orientation.lock) {
+            screen.orientation.lock('landscape').catch(function() {});
+        }
+        layout(); draw();
+    }, 300);
+    if (navigator.wakeLock && navigator.wakeLock.request) {
+        navigator.wakeLock.request('screen').catch(function() {});
+    }
+    pokeSleep();
+});
+
+route = DEMO;
+restore();
+refreshSetup();
+layout();
+draw();
+</script>
+</body>
+</html>

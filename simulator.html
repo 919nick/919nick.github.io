@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>CYD Roll Chart Simulator</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+* { box-sizing: border-box; }
+body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: #1a1a2e; color: #fff; min-height: 100vh;
+}
+.wrap { max-width: 560px; margin: 0 auto; padding: 14px; }
+h1 { font-size: 18px; margin: 4px 0 2px; }
+.sub { font-size: 12px; opacity: .6; margin-bottom: 12px; }
+
+/* ---- the device ---- */
+.bezel {
+    background: #111; border-radius: 14px; padding: 14px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.5), inset 0 0 0 2px #2a2a3a;
+}
+.device {
+    position: relative; width: 100%; aspect-ratio: 4 / 3;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+    overflow: hidden; border-radius: 4px; background: #000;
+}
+canvas#screen {
+    width: 100%; height: 100%; display: block;
+    image-rendering: pixelated;
+}
+.overlay {
+    position: absolute; inset: 0; display: none;
+    flex-direction: column; align-items: stretch; justify-content: stretch;
+}
+.overlay.show { display: flex; }
+#sleepOverlay { background: #000; opacity: .97; }
+#optionsOverlay { background: #f5f2e8; }
+.opt-btn {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    font-size: 6.5cqw; font-weight: 700; color: #1a1a2e;
+    border-bottom: 2px solid #1a1a2e33; cursor: pointer;
+}
+.opt-btn:last-child { border-bottom: none; }
+.opt-btn:active { background: #1a1a2e; color: #f5f2e8; }
+#qrOverlay { background: #fff; align-items: center; justify-content: center; gap: 8px; }
+#qrBox { background: #fff; padding: 2%; }
+#qrBox img, #qrBox canvas { width: 42cqw !important; height: 42cqw !important; }
+#qrCaption { color: #111; font-size: 4cqw; font-weight: 600; }
+#zonesOverlay { pointer-events: none; display: none; }
+#zonesOverlay.show { display: flex; flex-direction: row; }
+.zone { flex: 1; opacity: .18; display: flex; align-items: flex-end; justify-content: center;
+    font-size: 5cqw; font-weight: 700; padding-bottom: 4%; }
+.zone.prev { background: #e74c3c; flex: 0 0 33%; }
+.zone.next { background: #2ecc71; }
+#deviceToast {
+    position: absolute; left: 50%; bottom: 8%; transform: translateX(-50%);
+    background: #1a1a2e; color: #f5f2e8; font-size: 4cqw; font-weight: 600;
+    padding: 2% 5%; border-radius: 99px; opacity: 0; transition: opacity .2s;
+    pointer-events: none; white-space: nowrap;
+}
+#deviceToast.show { opacity: .95; }
+.device { container-type: inline-size; }
+
+/* ---- dev panel ---- */
+.panel { margin-top: 14px; display: flex; flex-direction: column; gap: 12px; }
+.card {
+    background: rgba(255,255,255,.05); border: 1px solid rgba(102,126,234,.25);
+    border-radius: 10px; padding: 12px;
+}
+.card h2 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; opacity: .6; margin: 0 0 8px; }
+.file-drop {
+    border: 2px dashed rgba(102,126,234,.5); border-radius: 8px; padding: 14px;
+    text-align: center; cursor: pointer; font-size: 13px;
+}
+.file-drop .name { color: #a5b4fc; font-weight: 600; }
+.row { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; font-size: 13px; }
+.row label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+input[type=number] {
+    width: 64px; background: rgba(255,255,255,.08); border: 1px solid rgba(102,126,234,.4);
+    color: #fff; border-radius: 5px; padding: 4px 6px; font-size: 13px;
+}
+.mini-btn {
+    padding: 6px 12px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,.2);
+    background: rgba(255,255,255,.07); color: #fff; cursor: pointer;
+}
+.mini-btn:active { background: rgba(102,126,234,.4); }
+#eventLog {
+    font-family: ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.6;
+    color: #9fb0d8; max-height: 150px; overflow-y: auto; background: rgba(0,0,0,.35);
+    border-radius: 6px; padding: 8px;
+}
+#eventLog .hl { color: #4ade80; }
+.hint { font-size: 11px; opacity: .55; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+    <h1>CYD Roll Chart Simulator</h1>
+    <div class="sub">320&times;240 &middot; tap zones / long-press options / sleep &middot; load JSON from the cue builder</div>
+
+    <div class="bezel">
+        <div class="device" id="device">
+            <canvas id="screen" width="320" height="240"></canvas>
+            <div class="overlay" id="zonesOverlay">
+                <div class="zone prev">PREV</div><div class="zone next">NEXT</div>
+            </div>
+            <div class="overlay" id="optionsOverlay">
+                <div class="opt-btn" data-act="qr">&#9635; QR to this cue</div>
+                <div class="opt-btn" data-act="zero">&#8634; Zero trip here</div>
+                <div class="opt-btn" data-act="back">&larr; Back</div>
+            </div>
+            <div class="overlay" id="qrOverlay">
+                <div id="qrBox"></div>
+                <div id="qrCaption">Scan &rarr; Maps &middot; tap to close</div>
+            </div>
+            <div class="overlay" id="sleepOverlay"></div>
+            <div id="deviceToast"></div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="card">
+            <h2>Route</h2>
+            <div class="file-drop" id="drop" onclick="document.getElementById('jsonFile').click()">
+                <span id="dropText">Drop cue JSON here or tap to browse (demo route loaded)</span>
+            </div>
+            <input type="file" id="jsonFile" accept=".json" style="display:none" onchange="loadJSON(this.files[0])">
+        </div>
+        <div class="card">
+            <h2>Interaction scheme</h2>
+            <div class="row">
+                <label><input type="radio" name="scheme" value="zones" checked> Tap zones (right=next, left=prev)</label>
+                <label><input type="radio" name="scheme" value="dtap"> Single=next, double=prev</label>
+            </div>
+            <div class="row" style="margin-top:8px">
+                <label><input type="checkbox" id="chkZones" onchange="document.getElementById('zonesOverlay').classList.toggle('show', this.checked)"> Show touch zones</label>
+                <label>Sleep after <input type="number" id="sleepSecs" value="30" min="0"> s (0=never)</label>
+            </div>
+            <div class="row" style="margin-top:8px">
+                <label><input type="radio" name="maps" value="apple" checked> Apple Maps QR</label>
+                <label><input type="radio" name="maps" value="google"> Google Maps QR</label>
+                <button class="mini-btn" onclick="resetDevice()" style="margin-left:auto">Reset device state</button>
+            </div>
+        </div>
+        <div class="card">
+            <h2>Event log</h2>
+            <div id="eventLog"></div>
+            <div class="hint" style="margin-top:8px">
+                Wake-tap rule: first tap on a sleeping screen only wakes it, never advances.
+                Trip zero: displayed mileage = cue cumulative &minus; offset; zero your bike's trip meter at the same moment.
+                State (cue index + offset) persists like NVS would.
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+'use strict';
+// ================= state & persistence (NVS stand-in) =================
+const store = (() => {
+    let mem = {};
+    try { const t = window.localStorage; t.setItem('_t','1'); t.removeItem('_t');
+        return { get: k => t.getItem(k), set: (k,v) => t.setItem(k,v) };
+    } catch (e) { return { get: k => mem[k] ?? null, set: (k,v) => mem[k]=v }; }
+})();
+
+let route = null;          // {routeName, cues:[...]}
+let idx = 0;               // current cue index
+let offsetMi = 0;          // trip zero offset
+let asleep = false;
+let sleepTimer = null;
+
+// ================= demo route =========================================
+const DEMO = { routeName: "Demo — Danbury Loop", totalMiles: 34.1, cues: [
+ { seq:1, type:"depart", text:"NC-8 N / NC-89 W", distFromPrev:0, cumulative:0, lat:36.4097, lon:-80.2061 },
+ { seq:2, type:"left", text:"NC-268 W", distFromPrev:6.69, cumulative:6.69, lat:36.4419, lon:-80.3138 },
+ { seq:3, type:"right", text:"NC-66 S", compound:["then quick left onto NC-66 S"], distFromPrev:3.83, cumulative:10.52, lat:36.4653, lon:-80.3771, note:"staggered crossroads" },
+ { seq:4, type:"straight", text:"NC-268 W", distFromPrev:0.06, cumulative:10.58, lat:36.4655, lon:-80.3779, verify:true },
+ { seq:5, type:"caution", text:"!! 120\u00b0 right curve", distFromPrev:4.1, cumulative:14.68, lat:36.4922, lon:-80.4433 },
+ { seq:6, type:"ramp", text:"US-52 N", distFromPrev:6.1, cumulative:20.78, lat:36.4488, lon:-80.6003, note:"gas at ramp" },
+ { seq:7, type:"exit", text:"Exit 18: I-74 W", distFromPrev:4.35, cumulative:25.13, lat:36.4991, lon:-80.6221 },
+ { seq:8, type:"sharp-left", text:"NC-18 S", distFromPrev:6.9, cumulative:32.03, lat:36.5203, lon:-80.7415 },
+ { seq:9, type:"arrive", text:"Arrive", distFromPrev:2.1, cumulative:34.13, lat:36.5305, lon:-80.7622 }
+]};
+
+// ================= screen rendering (320x240, TFT-style) ==============
+const cv = document.getElementById('screen');
+const ctx = cv.getContext('2d');
+const INK = '#1a1a2e', PAPER = '#f5f2e8', ACCENT = '#c0392b', AMBER = '#8a5a00';
+
+function draw() {
+    const c = route.cues[idx];
+    ctx.fillStyle = PAPER; ctx.fillRect(0, 0, 320, 240);
+    ctx.fillStyle = INK;
+
+    // top bar
+    ctx.fillStyle = INK; ctx.fillRect(0, 0, 320, 24);
+    ctx.fillStyle = PAPER;
+    ctx.font = 'bold 13px system-ui';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(trim(route.routeName || 'Route', 30), 6, 13);
+    ctx.textAlign = 'right';
+    ctx.fillText((idx + 1) + '/' + route.cues.length, 314, 13);
+
+    // glyph tile
+    ctx.strokeStyle = INK; ctx.lineWidth = 2;
+    ctx.strokeRect(8, 34, 96, 96);
+    drawGlyph(c.type || 'straight', 56, 82, 36);
+
+    // verify flag
+    if (c.verify) {
+        ctx.fillStyle = ACCENT; ctx.font = 'bold 12px system-ui'; ctx.textAlign = 'left';
+        ctx.fillText('VERIFY', 10, 142);
+    }
+
+    // road text (wrap to 2 lines, shrink to fit)
+    ctx.fillStyle = INK; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    let size = 26;
+    let lines = wrapText(c.text || '', size, 196);
+    while (lines.length > 2 && size > 15) { size -= 2; lines = wrapText(c.text, size, 196); }
+    ctx.font = 'bold ' + size + 'px system-ui';
+    lines.slice(0, 2).forEach((ln, k) => ctx.fillText(ln, 112, 60 + k * (size + 4)));
+
+    // compound sub lines
+    let y = 60 + Math.min(lines.length, 2) * (size + 4);
+    ctx.font = '13px system-ui';
+    (c.compound || []).slice(0, 2).forEach(s => { ctx.fillText('\u21b3 ' + trim(s, 26), 112, y); y += 16; });
+
+    // note
+    if (c.note) {
+        ctx.fillStyle = AMBER; ctx.font = 'italic 14px system-ui';
+        ctx.fillText(trim(c.note, 26), 112, y + 4);
+    }
+
+    // big mileage (relative to trip zero)
+    const rel = (c.cumulative || 0) - offsetMi;
+    ctx.fillStyle = INK;
+    ctx.font = 'bold 52px ui-monospace, Consolas, monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(rel.toFixed(1), 312, 226);
+    ctx.font = 'bold 14px system-ui';
+    ctx.fillText('mi', 312, 190);
+    if (offsetMi !== 0) {
+        ctx.fillStyle = ACCENT; ctx.font = 'bold 12px system-ui'; ctx.textAlign = 'left';
+        ctx.fillText('\u0394 zeroed @ ' + offsetMi.toFixed(1), 8, 226);
+    }
+    // next-leg hint
+    const nxt = route.cues[idx + 1];
+    if (nxt) {
+        ctx.fillStyle = INK; ctx.font = '13px system-ui'; ctx.textAlign = 'left';
+        ctx.fillText('next +' + (nxt.distFromPrev || 0).toFixed(1), 8, 206);
+    }
+}
+
+function trim(s, n) { return s.length > n ? s.slice(0, n - 1) + '\u2026' : s; }
+function wrapText(text, size, maxW) {
+    ctx.font = 'bold ' + size + 'px system-ui';
+    const words = String(text).split(' '), lines = []; let cur = '';
+    for (const w of words) {
+        const t = cur ? cur + ' ' + w : w;
+        if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = w; }
+        else cur = t;
+    }
+    if (cur) lines.push(cur);
+    return lines;
+}
+
+// glyphs: same vocabulary as the cue builder
+const ROT = { depart:0, straight:0, left:-90, right:90, 'sharp-left':-135, 'sharp-right':135,
+    'slight-left':-45, 'slight-right':45, 'keep-left':-30, 'keep-right':30, uturn:180 };
+function drawGlyph(key, cx, cy, r) {
+    ctx.save(); ctx.translate(cx, cy);
+    ctx.strokeStyle = INK; ctx.fillStyle = INK;
+    ctx.lineWidth = 7; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    if (key === 'arrive') {
+        ctx.beginPath(); ctx.arc(0, 0, r * .8, 0, 7); ctx.stroke();
+        ctx.fillStyle = ACCENT; ctx.beginPath(); ctx.arc(0, 0, r * .3, 0, 7); ctx.fill();
+    } else if (key === 'roundabout') {
+        ctx.beginPath(); ctx.arc(0, r * .25, r * .55, 0, 7); ctx.stroke();
+        arrow(0, r * -.3, 0, -r, r * .3);
+    } else if (key === 'ramp' || key === 'merge') {
+        ctx.beginPath(); ctx.moveTo(-r * .45, r);
+        ctx.quadraticCurveTo(-r * .45, 0, r * .5, -r * .55); ctx.stroke();
+        head(r * .5, -r * .55, -0.62, r * .3);
+    } else if (key === 'exit') {
+        ctx.beginPath(); ctx.moveTo(-r * .2, r); ctx.lineTo(-r * .2, -r * .9); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(-r * .2, r * .1);
+        ctx.quadraticCurveTo(r * .3, 0, r * .65, -r * .5); ctx.stroke();
+        head(r * .65, -r * .5, -0.72, r * .28);
+    } else if (String(key).startsWith('caution')) {
+        ctx.strokeStyle = ACCENT;
+        ctx.beginPath(); ctx.moveTo(0, -r); ctx.lineTo(r, r * .75); ctx.lineTo(-r, r * .75);
+        ctx.closePath(); ctx.stroke();
+        ctx.fillStyle = INK; ctx.font = 'bold ' + Math.round(r * .9) + 'px system-ui';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('!!', 0, r * .18);
+    } else {
+        const rot = (ROT[key] !== undefined ? ROT[key] : 0) * Math.PI / 180;
+        ctx.rotate(rot);
+        arrow(0, r, 0, -r, r * .42);
+    }
+    ctx.restore();
+
+    function arrow(x1, y1, x2, y2, hl) {
+        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+        const a = Math.atan2(y2 - y1, x2 - x1);
+        head(x2, y2, a, hl);
+    }
+    function head(x, y, a, hl) {
+        ctx.beginPath();
+        ctx.moveTo(x, y); ctx.lineTo(x - hl * Math.cos(a - .5), y - hl * Math.sin(a - .5));
+        ctx.moveTo(x, y); ctx.lineTo(x - hl * Math.cos(a + .5), y - hl * Math.sin(a + .5));
+        ctx.stroke();
+    }
+}
+
+// ================= device interaction ==================================
+const device = document.getElementById('device');
+const optOv = document.getElementById('optionsOverlay');
+const qrOv = document.getElementById('qrOverlay');
+const sleepOv = document.getElementById('sleepOverlay');
+
+let downT = 0, downX = 0, lpTimer = null, pendingTap = null, suppressTap = false;
+
+device.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    downT = performance.now(); downX = e.clientX;
+    suppressTap = false;
+    lpTimer = setTimeout(() => { suppressTap = true; onLongPress(); }, 600);
+});
+device.addEventListener('pointerup', e => {
+    clearTimeout(lpTimer);
+    if (suppressTap) return;
+    const dur = performance.now() - downT;
+    if (dur < 45) { logEv('tap ignored (<45ms, phantom filter)'); return; }
+    onTap(e.clientX);
+});
+device.addEventListener('pointercancel', () => clearTimeout(lpTimer));
+
+function scheme() { return document.querySelector('input[name=scheme]:checked').value; }
+
+function onTap(clientX) {
+    pokeSleep();
+    if (wakeIfAsleep()) { logEv('wake tap (no advance)', true); return; }
+    if (qrOv.classList.contains('show')) { qrOv.classList.remove('show'); logEv('QR closed'); return; }
+    if (optOv.classList.contains('show')) return; // options buttons handle themselves
+
+    const rect = device.getBoundingClientRect();
+    const fx = (clientX - rect.left) / rect.width;
+
+    if (scheme() === 'zones') {
+        if (fx < 0.33) prevCue('zone tap L');
+        else nextCue('zone tap R');
+    } else {
+        if (pendingTap) {
+            clearTimeout(pendingTap); pendingTap = null;
+            prevCue('double tap');
+        } else {
+            pendingTap = setTimeout(() => { pendingTap = null; nextCue('single tap (after 300ms wait)'); }, 300);
+        }
+    }
+}
+
+function onLongPress() {
+    pokeSleep();
+    if (wakeIfAsleep()) { logEv('wake long-press (no action)', true); return; }
+    if (qrOv.classList.contains('show') || optOv.classList.contains('show')) return;
+    optOv.classList.add('show');
+    logEv('long press \u2192 options', true);
+}
+
+optOv.querySelectorAll('.opt-btn').forEach(b => {
+    // stop the press from reaching the device handler at all: no phantom
+    // long-press timer gets armed while choosing a menu option
+    b.addEventListener('pointerdown', e => { e.stopPropagation(); clearTimeout(lpTimer); });
+    b.addEventListener('pointerup', e => {
+        e.stopPropagation(); clearTimeout(lpTimer);
+        const act = b.dataset.act;
+        optOv.classList.remove('show');
+        if (act === 'qr') showQR();
+        else if (act === 'zero') zeroTrip();
+        else logEv('options \u2192 back');
+    });
+});
+
+function nextCue(src) {
+    if (idx < route.cues.length - 1) { idx++; persist(); draw(); logEv(src + ' \u2192 cue ' + (idx + 1), true); devToast('\u25b6 ' + (idx + 1) + '/' + route.cues.length); }
+    else { logEv(src + ' \u2192 already at last cue'); devToast('End of chart'); }
+}
+function prevCue(src) {
+    if (idx > 0) { idx--; persist(); draw(); logEv(src + ' \u2192 cue ' + (idx + 1), true); devToast('\u25c0 ' + (idx + 1) + '/' + route.cues.length); }
+    else { logEv(src + ' \u2192 already at first cue'); devToast('Start of chart'); }
+}
+function zeroTrip() {
+    offsetMi = route.cues[idx].cumulative || 0;
+    persist(); draw();
+    logEv('trip zeroed at ' + offsetMi.toFixed(1) + ' mi \u2014 zero your bike trip meter now', true);
+    devToast('\u0394 Trip zeroed \u2014 reset bike odo');
+}
+function showQR() {
+    const c = route.cues[idx];
+    const provider = document.querySelector('input[name=maps]:checked').value;
+    const url = provider === 'apple'
+        ? 'https://maps.apple.com/?daddr=' + c.lat + ',' + c.lon
+        : 'https://www.google.com/maps/dir/?api=1&destination=' + c.lat + ',' + c.lon;
+    const box = document.getElementById('qrBox');
+    box.innerHTML = '';
+    new QRCode(box, { text: url, width: 200, height: 200, correctLevel: QRCode.CorrectLevel.M });
+    document.getElementById('qrCaption').textContent =
+        'Cue ' + (idx + 1) + ' \u2192 ' + (provider === 'apple' ? 'Apple' : 'Google') + ' Maps \u00b7 tap to close';
+    qrOv.classList.add('show');
+    logEv('QR shown: ' + url, true);
+}
+
+// ================= sleep ==============================================
+function pokeSleep() {
+    clearTimeout(sleepTimer);
+    const s = +document.getElementById('sleepSecs').value;
+    if (s > 0) sleepTimer = setTimeout(goSleep, s * 1000);
+}
+function goSleep() {
+    asleep = true;
+    sleepOv.classList.add('show');
+    logEv('screen sleep');
+}
+function wakeIfAsleep() {
+    if (!asleep) return false;
+    asleep = false;
+    sleepOv.classList.remove('show');
+    return true;
+}
+document.getElementById('sleepSecs').addEventListener('change', pokeSleep);
+
+// ================= load / persist =====================================
+function loadJSON(file) {
+    if (!file) return;
+    const r = new FileReader();
+    r.onload = () => {
+        try {
+            const j = JSON.parse(r.result);
+            if (!j.cues || !j.cues.length) throw new Error('no cues array');
+            route = j; idx = 0; offsetMi = 0;
+            persist(); draw(); pokeSleep();
+            document.getElementById('dropText').innerHTML =
+                '<span class="name">' + (j.routeName || file.name) + '</span> \u00b7 ' + j.cues.length + ' cues \u00b7 ' + (j.totalMiles || '?') + ' mi';
+            logEv('route loaded: ' + (j.routeName || file.name), true);
+        } catch (e) { logEv('JSON load failed: ' + e.message); }
+    };
+    r.readAsText(file);
+}
+const dropEl = document.getElementById('drop');
+dropEl.addEventListener('dragover', e => e.preventDefault());
+dropEl.addEventListener('drop', e => { e.preventDefault(); loadJSON(e.dataTransfer.files[0]); });
+
+function persist() {
+    store.set('cyd_state', JSON.stringify({ name: route.routeName, idx, offsetMi }));
+}
+function resetDevice() {
+    idx = 0; offsetMi = 0; persist(); draw();
+    logEv('device state reset', true);
+}
+function restore() {
+    try {
+        const s = JSON.parse(store.get('cyd_state') || 'null');
+        if (s && s.name === route.routeName) { idx = Math.min(s.idx || 0, route.cues.length - 1); offsetMi = s.offsetMi || 0; }
+    } catch (e) {}
+}
+
+// ================= log =================================================
+function logEv(msg, hl) {
+    const el = document.getElementById('eventLog');
+    const t = new Date().toTimeString().slice(0, 8);
+    el.innerHTML = '<div class="' + (hl ? 'hl' : '') + '">' + t + '  ' + msg + '</div>' + el.innerHTML;
+    const rows = el.children;
+    while (rows.length > 40) el.removeChild(el.lastChild);
+}
+
+// ================= boot ================================================
+route = DEMO;
+restore();
+draw();
+pokeSleep();
+logEv('simulator ready \u2014 demo route loaded', true);
+</script>
+</body>
+</html>
