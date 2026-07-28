@@ -1,18 +1,51 @@
 /*
   CYD Bring-Up Test — Roll Chart Project
   ---------------------------------------
-  Purpose: prove the display and touch panel work BEFORE any cue/route
-  logic is written. Two isolated stages, toggled by TEST_TOUCH below,
-  so a problem in one system doesn't get confused with a problem in
-  the other.
+  Purpose: prove the display, touch panel, and onboard flash storage
+  work BEFORE any cue/route logic is written. Three isolated stages,
+  toggled by TEST_TOUCH / TEST_LFS below. Display and touch are already
+  confirmed working on your unit; LittleFS is the new one.
+
+  Storage decision: SD card was dropped after repeated mount failures
+  that survived fixing the real underlying SPI-peripheral conflict —
+  likely a bad or incompatible card, not worth further debugging time.
+  Route storage moves to onboard flash via LittleFS instead. Unlike SD,
+  this needs no extra wiring, no card to seat, and no second SPI bus to
+  reason about — it's a filesystem living on the same flash chip the
+  firmware itself runs from.
+
+  IMPORTANT — Partition Scheme: LittleFS needs actual flash space set
+  aside for it. In the Arduino IDE, check Tools > Partition Scheme and
+  pick one that includes filesystem space (anything with "SPIFFS" in
+  its name reserves this correctly — LittleFS and SPIFFS share the same
+  underlying partition slot despite the differing name). If you're
+  using a scheme with no FS partition at all, LittleFS.begin() will
+  fail immediately no matter what the code does.
+
+  ── WHY TOUCH USES A DIFFERENT LIBRARY THAN THE FIRST VERSION ─────────
+  The classic ESP32 only has TWO usable hardware SPI peripherals. This
+  board wires display, touch, and (formerly) SD to three separate sets
+  of pins, but that doesn't create three independent hardware buses —
+  TFT_eSPI claims one hardware peripheral internally, which used to
+  leave touch and SD fighting over the single remaining one. The fix:
+  touch runs over "bit-banged" software SPI (XPT2046_Bitbang) instead
+  of hardware SPI. Confirmed against this board's own community
+  troubleshooting doc (github.com/witnessmenow/ESP32-Cheap-Yellow-
+  Display/blob/main/TROUBLESHOOTING.md) and discussion #88 there.
 
   ── REQUIRED SETUP BEFORE THIS COMPILES ──────────────────────────────
   1. Board: install "esp32" in Boards Manager (by Espressif). Select
-     board "ESP32 Dev Module" once installed.
+     board "ESP32 Dev Module" once installed — NOT any C6/S3/other
+     variant, the CYD uses the classic ESP32 (WROOM-32).
 
   2. Libraries (Library Manager):
-       - TFT_eSPI          (Bodmer)
-       - XPT2046_Touchscreen (Paul Stoffregen)
+       - TFT_eSPI              (Bodmer)
+       - XPT2046_Bitbang_Slim  (TheNitek / Claus Naveke)
+     If you also have a plain "XPT2046_Bitbang" library installed
+     (not "_Slim"), remove it or rename its folder — Arduino will
+     silently pick whichever one it finds first if both expose a file
+     named XPT2046_Bitbang.h, and only "_Slim" has the xRaw/yRaw/zRaw
+     API this sketch uses.
 
   3. TFT_eSPI User_Setup.h — THIS IS THE STEP THAT TRIPS EVERYONE UP.
      TFT_eSPI needs to know which ESP32 pins the CYD wired to the
@@ -23,25 +56,22 @@
        - Replace the contents of:
            <ArduinoLibraries>/TFT_eSPI/User_Setup.h
          with that file (back up the original first).
-     Do this before opening this sketch, or you'll be debugging two
-     unknowns (your code + wrong pin config) at once.
 
-  4. The touch pin numbers below (XPT2046_*) are the commonly-published
-     pinout for this board family. If your specific listing/revision
-     differs, cross-check against whatever community pinout thread
-     you used for step 3 — I have not been able to verify these
-     against your exact hardware since I don't have the board.
+  4. Touch calibration below (TS_MINX etc.) was measured against real
+     corner taps on your actual unit — confirmed working.
+
+  5. LittleFS needs no separate library install — it ships built into
+     the ESP32 Arduino core. Just the partition scheme check above.
   ──────────────────────────────────────────────────────────────────────
 */
-
 #include <SPI.h>
 #include <TFT_eSPI.h>
-#include <XPT2046_Touchscreen.h>
+#include <XPT2046_Bitbang.h>
+#include <LittleFS.h>
 
 // ---- toggle which stage runs -------------------------------------------
-// Start with 0: prove the screen alone works first.
-// Once that's confirmed, flip to 1 to bring up touch.
 #define TEST_TOUCH 1
+#define TEST_LFS   1
 
 // ---- commonly published XPT2046 touch pins for ESP32-2432S028R --------
 // Verify these against your board's community pinout before trusting them.
@@ -63,18 +93,80 @@
 
 TFT_eSPI tft = TFT_eSPI();
 
-// No bus name (VSPI/HSPI) passed here on purpose — those constants were
-// removed in newer ESP32 Arduino cores (3.x) and this form works across
-// both old and new core versions. Pins are assigned explicitly below in
-// touchSPI.begin() instead of via the constructor.
-SPIClass touchSPI;
-XPT2046_Touchscreen touch(XPT2046_CS, XPT2046_IRQ);
+// Software (bit-banged) SPI for touch — this is the actual fix. No
+// SPIClass object needed here at all; the library toggles these pins
+// directly in code rather than using a hardware SPI peripheral.
+XPT2046_Bitbang touch(XPT2046_MOSI, XPT2046_MISO, XPT2046_CLK, XPT2046_CS);
 
 // Roll chart palette — same convention as the web tools, so anything
 // that looks right here will look right in the cue renderer later.
 #define INK   0x18E3   // dark navy, approximates #1a1a2e in RGB565
 #define PAPER 0xF79E   // cream, approximates #f5f2e8 in RGB565
 #define ACCENT 0xC186  // red, approximates #c0392b in RGB565
+
+#if TEST_LFS
+// Recursively list what's already on the filesystem — mostly useful
+// after a few test runs to confirm old test files got cleaned up, and
+// later on, to confirm real route JSONs are actually visible.
+void listDir(fs::FS &fs, const char *dirname, uint8_t levels) {
+  fs::File root = fs.open(dirname);
+  if (!root || !root.isDirectory()) {
+    Serial.println("  (could not open directory)");
+    return;
+  }
+  fs::File file = root.openNextFile();
+  while (file) {
+    for (uint8_t i = 0; i < (2 - levels); i++) Serial.print("  ");
+    if (file.isDirectory()) {
+      Serial.print("  [DIR] ");
+      Serial.println(file.name());
+      if (levels) listDir(fs, file.path(), levels - 1);
+    } else {
+      Serial.print("  ");
+      Serial.print(file.name());
+      Serial.print("  (");
+      Serial.print(file.size());
+      Serial.println(" bytes)");
+    }
+    file = root.openNextFile();
+  }
+}
+
+// Proves LittleFS isn't just mounted but actually writable, and that a
+// JSON-shaped payload survives a full write + close + reopen + read
+// cycle intact — the real operation the route library depends on.
+void writeReadTest() {
+  const char *path = "/roll_chart_test.txt";
+  const char *payload = "{\"test\":\"roll chart LittleFS bring-up\",\"ok\":true}";
+
+  Serial.println("Write/read test:");
+  fs::File f = LittleFS.open(path, "w");
+  if (!f) {
+    Serial.println("  FAILED to open file for writing.");
+    return;
+  }
+  f.print(payload);
+  f.close();
+
+  f = LittleFS.open(path, "r");
+  if (!f) {
+    Serial.println("  FAILED to reopen file for reading.");
+    return;
+  }
+  String readBack = f.readString();
+  f.close();
+  LittleFS.remove(path); // clean up after ourselves
+
+  if (readBack == payload) {
+    Serial.println("  PASSED — wrote and read back an exact match.");
+  } else {
+    Serial.print("  MISMATCH — wrote: ");
+    Serial.println(payload);
+    Serial.print("             read:  ");
+    Serial.println(readBack);
+  }
+}
+#endif
 
 void setup() {
   Serial.begin(115200);
@@ -95,33 +187,66 @@ void setup() {
 
 #if TEST_TOUCH
   // ---- Stage 2: touch ----
-  touchSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
-  touch.begin(touchSPI);
-  touch.setRotation(1);
+  touch.begin();
   Serial.println("Touch initialized. Tap the screen — raw coordinates will print below.");
+#endif
+
+#if TEST_LFS
+  // ---- Stage 3: onboard flash storage (LittleFS) ----
+  // true = format automatically if no filesystem is found yet. On a
+  // brand new board (or after changing partition scheme) there is no
+  // LittleFS partition initialized, so the FIRST boot after enabling
+  // this will format it — that's expected, not a failure. Subsequent
+  // boots mount the already-formatted partition normally.
+  if (!LittleFS.begin(true)) {
+    Serial.println("LittleFS.begin() FAILED.");
+    Serial.println("Checklist: Tools > Partition Scheme includes a");
+    Serial.println("filesystem partition (look for \"SPIFFS\" in the name).");
+  } else {
+    Serial.println("LittleFS mounted OK.");
+    Serial.print("Total: ");
+    Serial.print(LittleFS.totalBytes() / 1024);
+    Serial.print(" KB   Used: ");
+    Serial.print(LittleFS.usedBytes() / 1024);
+    Serial.println(" KB");
+
+    Serial.println("Root directory contents:");
+    listDir(LittleFS, "/", 1);
+
+    writeReadTest();
+  }
 #endif
 }
 
 void loop() {
 #if TEST_TOUCH
-  if (touch.touched()) {
-    TS_Point p = touch.getPoint();
-    Serial.print("touch raw: x=");
-    Serial.print(p.x);
-    Serial.print("  y=");
-    Serial.print(p.y);
-    Serial.print("  z(pressure)=");
-    Serial.println(p.z);
+  // getTouch() returns a struct with x/y (library-calibrated) and
+  // xRaw/yRaw/zRaw (raw ADC values). Using auto here deliberately —
+  // avoids hardcoding the exact struct type name from a library I
+  // can't compile against myself.
+  auto p = touch.getTouch();
 
-    // Draw a small crosshair at the RAW coordinate scaled roughly onto
-    // the 320x240 screen just so you get a visual too. This mapping is
-    // NOT calibrated — raw touch coordinates rarely match screen pixels
-    // 1:1 straight out of the box. That calibration is the next step
-    // after this test passes, not something to solve here.
-    // Calibrated mapping (see TS_MINX/MAXX/MINY/MAXY above), clamped so a
-    // touch just outside the measured corners doesn't fly off-screen.
-    int sx = constrain(map(p.x, TS_MINX, TS_MAXX, 0, 320), 0, 319);
-    int sy = constrain(map(p.y, TS_MINY, TS_MAXY, 0, 240), 0, 239);
+  // No confirmed "not touched" sentinel for this library from what I
+  // could verify, so this uses a pressure threshold instead — the same
+  // approach that worked for the previous library. TOUCH_THRESHOLD is
+  // a starting guess: watch the zRaw values printed below while NOT
+  // touching vs firmly touching the screen, and adjust this constant
+  // to sit cleanly between those two ranges.
+  const int TOUCH_THRESHOLD = 200;
+  if (p.zRaw > TOUCH_THRESHOLD) {
+    Serial.print("touch raw: x=");
+    Serial.print(p.xRaw);
+    Serial.print("  y=");
+    Serial.print(p.yRaw);
+    Serial.print("  zRaw=");
+    Serial.println(p.zRaw);
+
+    // Same calibration constants as before — carried over as a starting
+    // point, but re-verify against real corner taps since this library
+    // may not report the same orientation as the old one did (see note
+    // 6 at the top of this file).
+    int sx = constrain(map(p.xRaw, TS_MINX, TS_MAXX, 0, 320), 0, 319);
+    int sy = constrain(map(p.yRaw, TS_MINY, TS_MAXY, 0, 240), 0, 239);
     tft.fillCircle(sx, sy, 4, ACCENT);
 
     delay(80); // crude debounce so one touch doesn't flood Serial
