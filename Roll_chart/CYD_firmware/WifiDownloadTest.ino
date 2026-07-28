@@ -53,12 +53,14 @@
 #include <stdio.h>
 #include "glyphs.h"
 
-#define WIFI_SSID     "SSID"
-#define WIFI_PASSWORD "PW"
-#define GITHUB_OWNER  "Name"
-#define GITHUB_REPO   "Repo"
-#define GITHUB_TOKEN  "Token Goes Here"
+// ---- FILL THESE IN — placeholders, not real credentials -----------------
+#define WIFI_SSID     ""
+#define WIFI_PASSWORD ""
+#define GITHUB_OWNER  ""
+#define GITHUB_REPO   ""
+#define GITHUB_TOKEN  ""
 #define GITHUB_BRANCH "main" 
+
 
 // ---- touch pins + calibration (confirmed working) -----------------------
 #define XPT2046_MOSI 32
@@ -67,8 +69,13 @@
 #define XPT2046_CS   33
 #define TS_MINX 250
 #define TS_MAXX 3700
-#define TS_MINY 380
-#define TS_MAXY 3750
+// Y range widened based on real edge-tap data (349 top / 3934 bottom
+// — both OUTSIDE the old 380/3750 range, which is exactly why a
+// center-screen tap was landing on the top menu button instead of
+// the middle one). Small margin applied beyond the measured taps,
+// same convention as the original X calibration.
+#define TS_MINY 330
+#define TS_MAXY 3950
 
 TFT_eSPI tft = TFT_eSPI();
 XPT2046_Bitbang touch(XPT2046_MOSI, XPT2046_MISO, XPT2046_CLK, XPT2046_CS);
@@ -97,6 +104,42 @@ int ROUTE_LEN = 0;
 const char* ROUTE_NAME = "Loading...";
 int idx = 0;
 float offsetMi = 0;
+
+// ---- touch state — moved here (was previously declared right before
+// setup(), which is TOO LATE): handleOptionsTap()/handlePickerTap() are
+// defined earlier in the file and reference these directly. Arduino
+// auto-generates forward declarations for FUNCTIONS but never for
+// global variables, so the compiler needs to have already seen these
+// declarations by the time it reaches any function body that uses
+// them. Consolidating all globals together up here avoids this class
+// of ordering bug entirely, rather than relying on remembering where
+// in the file is "early enough."
+unsigned long pressStart = 0;
+bool pressActive = false;
+bool longPressFired = false;
+bool positionLocked = false; // NEW: replaces continuous-overwrite capture
+int lockedXRaw = 0;
+int lockedYRaw = 0; // was lastTouchXRaw/lastTouchYRaw — renamed because
+                     // the capture STRATEGY changed, not just the name.
+                     // See loop() comment for why.
+const unsigned long LONG_PRESS_MS = 600;
+const unsigned long MIN_PRESS_MS = 45; // phantom-touch filter
+const unsigned long SETTLE_MS = 25; // let the resistive panel's voltage
+                                     // stabilize after initial contact
+                                     // before trusting a reading
+
+// ---- UI mode: long-press now opens a real menu instead of directly
+// triggering sync, per the earlier design decision. Touch dispatch in
+// loop() branches on this.
+enum AppMode { MODE_CUE, MODE_OPTIONS, MODE_PICKER };
+AppMode mode = MODE_CUE;
+
+// Route picker's cached list — built once when entering MODE_PICKER,
+// not re-read from the manifest on every touch check.
+#define MAX_ROUTE_ENTRIES 4
+String pickerLabels[MAX_ROUTE_ENTRIES + 1]; // +1 for the always-present demo route
+String pickerPaths[MAX_ROUTE_ENTRIES + 1];
+int pickerCount = 0;
 
 // JsonDocument lives for the whole program — see string-lifetime note
 // in the header comment above. Never cleared after the initial load.
@@ -644,9 +687,118 @@ void syncRoutes() {
   Serial.print("Failed: "); Serial.println(failed);
 }
 
-// ---- long-press now runs the real connectivity test instead of the
-// old stub message — same detection logic, pointed at something real.
-void showLongPressStub() {
+// ---- builds the route picker's list: the demo route (always present
+// as a safe fallback) plus everything currently in the sync manifest.
+// Read once when entering the picker, not per-touch.
+void buildRouteList() {
+  pickerCount = 0;
+  pickerLabels[pickerCount] = "Demo Route";
+  pickerPaths[pickerCount] = "/demo_route.json";
+  pickerCount++;
+
+  JsonDocument manifest;
+  loadManifest(manifest);
+  int skipped = 0;
+  for (JsonPair kv : manifest.as<JsonObject>()) {
+    const char* localPath = kv.value()["local"] | "";
+    if (strlen(localPath) == 0) continue;
+    if (pickerCount >= MAX_ROUTE_ENTRIES + 1) { skipped++; continue; }
+    pickerLabels[pickerCount] = String(kv.key().c_str()); // full repo path as label
+    pickerPaths[pickerCount] = String(localPath);
+    pickerCount++;
+  }
+  if (skipped > 0) {
+    Serial.print("Route picker: ");
+    Serial.print(skipped);
+    Serial.println(" synced route(s) not shown — MAX_ROUTE_ENTRIES cap (no scrolling yet).");
+  }
+}
+
+// ---- generic row hit-test: given a touch Y, a list top, and a fixed
+// row height, returns which row index was hit, or -1 for none.
+int hitRow(int y, int top, int rowH, int count) {
+  if (y < top) return -1;
+  int row = (y - top) / rowH;
+  if (row < 0 || row >= count) return -1;
+  return row;
+}
+
+#define ROW_H 34
+#define ROW_TOP 28
+
+void drawRoutePicker() {
+  tft.fillScreen(PAPER);
+  tft.fillRect(0, 0, 320, 24, INK);
+  tft.setFreeFont(&FreeSans9pt7b);
+  tft.setTextColor(PAPER, INK);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString("Pick a Route", 6, 5);
+
+  tft.setFreeFont(&FreeSansBold9pt7b);
+  for (int i = 0; i < pickerCount; i++) {
+    int y = ROW_TOP + i * ROW_H;
+    tft.drawRect(10, y, 300, ROW_H - 6, INK);
+    tft.setTextColor(INK, PAPER);
+    tft.setTextDatum(ML_DATUM);
+    String label = pickerLabels[i];
+    if (label.length() > 32) label = label.substring(0, 29) + "...";
+    tft.drawString(label, 20, y + (ROW_H - 6) / 2);
+  }
+  int backY = ROW_TOP + pickerCount * ROW_H;
+  tft.drawRect(10, backY, 300, ROW_H - 6, ACCENT);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(ACCENT, PAPER);
+  tft.drawString("Back", 160, backY + (ROW_H - 6) / 2);
+  tft.setTextDatum(TL_DATUM);
+}
+
+void handlePickerTap(int sy) {
+  int row = hitRow(sy, ROW_TOP, ROW_H, pickerCount + 1); // +1 = Back row
+  Serial.print("Picker tap: rawY=");
+  Serial.print(lockedYRaw);
+  Serial.print(" sy=");
+  Serial.print(sy);
+  Serial.print(" -> row=");
+  Serial.println(row);
+  if (row >= 0 && row < pickerCount) {
+    Serial.print("Loading route: ");
+    Serial.println(pickerPaths[row]);
+    if (loadRouteFromFS(pickerPaths[row].c_str())) {
+      idx = 0;
+      mode = MODE_CUE;
+      drawCue(idx);
+    } else {
+      Serial.println("Load failed — falling back to error cue.");
+      loadFallbackErrorRoute();
+      mode = MODE_CUE;
+      drawCue(idx);
+    }
+  } else {
+    // Back row, or a tap that missed every row
+    mode = MODE_OPTIONS;
+    drawOptionsMenu();
+  }
+}
+
+#define OPT_BTN_H 60
+#define OPT_BTN_TOP 30
+#define OPT_BTN_GAP 10
+
+void drawOptionsMenu() {
+  tft.fillScreen(PAPER);
+  tft.setFreeFont(&FreeSansBold12pt7b);
+  const char* labels[3] = { "Sync Now", "Pick Route", "Back" };
+  for (int i = 0; i < 3; i++) {
+    int y = OPT_BTN_TOP + i * (OPT_BTN_H + OPT_BTN_GAP);
+    tft.fillRect(30, y, 260, OPT_BTN_H, INK);
+    tft.setTextColor(PAPER, INK);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(labels[i], 160, y + OPT_BTN_H / 2);
+  }
+  tft.setTextDatum(TL_DATUM);
+}
+
+void runSyncWithOverlay() {
   tft.fillRect(20, 80, 280, 80, INK);
   tft.drawRect(20, 80, 280, 80, PAPER);
   tft.setFreeFont(&FreeSansBold12pt7b);
@@ -663,7 +815,41 @@ void showLongPressStub() {
   tft.drawString("Done - see Serial", 160, 120);
   tft.setTextDatum(TL_DATUM);
   delay(1200);
-  drawCue(idx); // redraw the real cue underneath
+  drawOptionsMenu(); // stay in the menu after syncing, not back to the cue
+}
+
+void handleOptionsTap(int sy) {
+  int row = hitRow(sy, OPT_BTN_TOP, OPT_BTN_H + OPT_BTN_GAP, 3);
+  Serial.print("Options tap: rawY=");
+  Serial.print(lockedYRaw);
+  Serial.print(" sy=");
+  Serial.print(sy);
+  Serial.print(" -> row=");
+  Serial.println(row);
+  if (row == 0) {
+    runSyncWithOverlay();
+  } else if (row == 1) {
+    buildRouteList();
+    mode = MODE_PICKER;
+    drawRoutePicker();
+  } else if (row == 2) {
+    mode = MODE_CUE;
+    drawCue(idx);
+  }
+  // a tap that missed all three rows does nothing — stays on the menu
+}
+
+// ---- long-press: opens the menu from cue view; from anywhere else
+// (menu or picker), acts as a universal "back to cue" escape hatch —
+// always a way out, regardless of how deep in the UI you are.
+void handleLongPress() {
+  if (mode == MODE_CUE) {
+    mode = MODE_OPTIONS;
+    drawOptionsMenu();
+  } else {
+    mode = MODE_CUE;
+    drawCue(idx);
+  }
 }
 
 void nextCue() {
@@ -685,16 +871,6 @@ void prevCue() {
     edgeFlash();
   }
 }
-
-
-// ---- touch state (was accidentally dropped during reassembly of this
-// sketch from the touch test + JSON loader — loop() needs these) --------
-unsigned long pressStart = 0;
-bool pressActive = false;
-bool longPressFired = false;
-int lastTouchXRaw = 0;
-const unsigned long LONG_PRESS_MS = 600;
-const unsigned long MIN_PRESS_MS = 45; // phantom-touch filter
 
 void setup() {
   Serial.begin(115200);
@@ -725,39 +901,66 @@ void loop() {
   auto p = touch.getTouch();
   bool touching = p.zRaw > 200; // same threshold confirmed against your unit
 
-  // Capture position continuously WHILE pressed — at the instant of
-  // release, touching is already false and the library's reported
-  // coordinates at that exact moment aren't something I can vouch
-  // for. Using the last known-good position from during the press
-  // avoids depending on that.
-  if (touching) lastTouchXRaw = p.xRaw;
+  // Position is captured ONCE per press, early — not continuously
+  // overwritten through to release. A resistive panel is noisiest
+  // right as a finger lifts off (contact degrading unevenly), which
+  // is exactly what "continuously overwrite until release" was
+  // sampling. This instead waits SETTLE_MS for the panel to
+  // stabilize after initial contact, takes ONE reading, and locks
+  // it — ignoring everything after, including the noisy lift-off
+  // moment. Left-right zone taps (cue view) never surfaced this,
+  // since a coarse 33/67 split tolerates far more noise than
+  // three-way menu row hit-testing does.
+  if (touching && pressActive && !positionLocked &&
+      millis() - pressStart >= SETTLE_MS) {
+    lockedXRaw = p.xRaw;
+    lockedYRaw = p.yRaw;
+    positionLocked = true;
+  }
 
   if (touching && !pressActive) {
     // press just started
     pressActive = true;
     longPressFired = false;
+    positionLocked = false;
     pressStart = millis();
   } else if (touching && pressActive) {
     // held — check for long-press threshold
     if (!longPressFired && millis() - pressStart >= LONG_PRESS_MS) {
       longPressFired = true;
-      showLongPressStub();
+      handleLongPress();
     }
   } else if (!touching && pressActive) {
     // release
     unsigned long heldFor = millis() - pressStart;
     pressActive = false;
     if (!longPressFired && heldFor >= MIN_PRESS_MS) {
-      // genuine short tap — dispatch by screen zone, using the position
-      // captured during the press, not read fresh after release
-      int sx = constrain(map(lastTouchXRaw, TS_MINX, TS_MAXX, 0, 320), 0, 319);
-      float fx = sx / 320.0;
-      if (fx < 0.33) {
-        Serial.println("Zone tap: LEFT (prev)");
-        prevCue();
-      } else {
-        Serial.println("Zone tap: RIGHT (next)");
-        nextCue();
+      // genuine short tap — dispatch by current UI mode, using the
+      // LOCKED early-press position, not a fresh/late sample
+      int sx = constrain(map(lockedXRaw, TS_MINX, TS_MAXX, 0, 320), 0, 319);
+      int sy = constrain(map(lockedYRaw, TS_MINY, TS_MAXY, 0, 240), 0, 239);
+
+      if (mode == MODE_CUE) {
+        float fx = sx / 320.0;
+        if (fx < 0.33) {
+          Serial.println("Zone tap: LEFT (prev)");
+          prevCue();
+        } else {
+          Serial.println("Zone tap: RIGHT (next)");
+          nextCue();
+        }
+      } else if (mode == MODE_OPTIONS || mode == MODE_PICKER) {
+        // Visible crosshair at the COMPUTED position, held briefly
+        // before the action fires — this is direct visual ground
+        // truth: compare where the dot actually appears against
+        // where your finger actually was, rather than us both
+        // guessing from verbal descriptions. Same technique that
+        // made the original X-axis calibration reliable.
+        tft.fillCircle(sx, sy, 5, ACCENT);
+        tft.drawCircle(sx, sy, 8, ACCENT);
+        delay(500);
+        if (mode == MODE_OPTIONS) handleOptionsTap(sy);
+        else handlePickerTap(sy);
       }
     }
     // if heldFor < MIN_PRESS_MS, silently ignored (phantom touch)
