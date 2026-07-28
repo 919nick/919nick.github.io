@@ -1,0 +1,147 @@
+{
+  "routeName": "Back Of The Dragon Day Loop",
+  "source": "gpx-osrm-match",
+  "totalMiles": 178.3,
+  "cues": [
+    {
+      "seq": 1,
+      "type": "depart",
+      "text": "West Pine Street/NC 89",
+      "distFromPrev": 74.86,
+      "cumulative": 74.86,
+      "lat": 36.483797,
+      "lon": -80.756727
+    },
+    {
+      "seq": 2,
+      "type": "left",
+      "text": "NC 18 South",
+      "distFromPrev": 11.89,
+      "cumulative": 86.75,
+      "lat": 36.557438,
+      "lon": -80.898847
+    },
+    {
+      "seq": 3,
+      "type": "right",
+      "text": "Alleghany Street",
+      "compound": [
+        "Turn left onto East Doughton Street"
+      ],
+      "distFromPrev": 15.46,
+      "cumulative": 102.21,
+      "lat": 36.505926,
+      "lon": -81.12024
+    },
+    {
+      "seq": 4,
+      "type": "right",
+      "text": "Stop light / 21 N",
+      "distFromPrev": 0,
+      "cumulative": 102.21,
+      "lat": 36.505926,
+      "lon": -81.12024
+    },
+    {
+      "seq": 5,
+      "type": "right",
+      "text": "NC 93 West",
+      "distFromPrev": 3.77,
+      "cumulative": 105.98,
+      "lat": 36.528519,
+      "lon": -81.177317
+    },
+    {
+      "seq": 6,
+      "type": "right",
+      "text": "NC 93 - Stop sign",
+      "distFromPrev": 9.35,
+      "cumulative": 115.33,
+      "lat": 36.567587,
+      "lon": -81.305848
+    },
+    {
+      "seq": 7,
+      "type": "right",
+      "text": "US 58 - Stop sign",
+      "distFromPrev": 1.44,
+      "cumulative": 116.77,
+      "lat": 36.586052,
+      "lon": -81.314762
+    },
+    {
+      "seq": 8,
+      "type": "left",
+      "text": "Fox Creek - white building",
+      "distFromPrev": 2.4,
+      "cumulative": 119.17,
+      "lat": 36.609264,
+      "lon": -81.294096
+    },
+    {
+      "seq": 9,
+      "type": "right",
+      "text": "Flat Ridge - Stop Sign",
+      "distFromPrev": 5.19,
+      "cumulative": 124.36,
+      "lat": 36.66095,
+      "lon": -81.337816
+    },
+    {
+      "seq": 10,
+      "type": "right",
+      "text": "VA 16 - Stop sign",
+      "distFromPrev": 11.87,
+      "cumulative": 136.23,
+      "lat": 36.775634,
+      "lon": -81.412489
+    },
+    {
+      "seq": 11,
+      "type": "right",
+      "text": "East Main - Stoplight at Exxon",
+      "distFromPrev": 10.2,
+      "cumulative": 146.43,
+      "lat": 36.834523,
+      "lon": -81.516101
+    },
+    {
+      "seq": 12,
+      "type": "left",
+      "text": "Chatham Hill - Stop light ",
+      "distFromPrev": 0.15,
+      "cumulative": 146.58,
+      "lat": 36.836601,
+      "lon": -81.515774,
+      "note": "Between white buildings"
+    },
+    {
+      "seq": 13,
+      "type": "right",
+      "text": "Louise Avenue",
+      "distFromPrev": 0.24,
+      "cumulative": 146.82,
+      "lat": 36.839604,
+      "lon": -81.517671
+    },
+    {
+      "seq": 14,
+      "type": "left",
+      "text": "VA 16",
+      "distFromPrev": 1.33,
+      "cumulative": 148.14,
+      "lat": 36.858127,
+      "lon": -81.514238,
+      "note": "Follow 16 N to the store"
+    },
+    {
+      "seq": 15,
+      "type": "arrive",
+      "text": "BoD Store",
+      "distFromPrev": 30.16,
+      "cumulative": 178.31,
+      "lat": 37.114288,
+      "lon": -81.526439
+    }
+  ]
+}
