@@ -51,6 +51,16 @@
 #define XPT2046_CLK  25
 #define XPT2046_CS   33
 
+// ---- touch calibration, measured from real corner taps ----------------
+// No axis swap or inversion needed: raw X increases left->right and raw Y
+// increases top->bottom, matching screen orientation at rotation(1).
+// Small margin added inside the measured extremes since corner taps with
+// a stylus tend to land just shy of the true physical edge.
+#define TS_MINX 250
+#define TS_MAXX 3700
+#define TS_MINY 380
+#define TS_MAXY 3750
+
 TFT_eSPI tft = TFT_eSPI();
 
 // No bus name (VSPI/HSPI) passed here on purpose — those constants were
@@ -108,8 +118,10 @@ void loop() {
     // NOT calibrated — raw touch coordinates rarely match screen pixels
     // 1:1 straight out of the box. That calibration is the next step
     // after this test passes, not something to solve here.
-    int sx = map(p.x, 0, 4095, 0, 320);
-    int sy = map(p.y, 0, 4095, 0, 240);
+    // Calibrated mapping (see TS_MINX/MAXX/MINY/MAXY above), clamped so a
+    // touch just outside the measured corners doesn't fly off-screen.
+    int sx = constrain(map(p.x, TS_MINX, TS_MAXX, 0, 320), 0, 319);
+    int sy = constrain(map(p.y, TS_MINY, TS_MAXY, 0, 240), 0, 239);
     tft.fillCircle(sx, sy, 4, ACCENT);
 
     delay(80); // crude debounce so one touch doesn't flood Serial
