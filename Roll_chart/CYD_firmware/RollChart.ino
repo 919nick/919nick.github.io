@@ -68,29 +68,25 @@
 
 // ---- FILL THESE IN — placeholders, not real credentials -----------------
 // Two networks, tried in order: home WiFi first, then a phone hotspot.
-#define WIFI_SSID_1     ""
-#define WIFI_PASSWORD_1 ""
-#define WIFI_SSID_2     ""
-#define WIFI_PASSWORD_2 ""
-#define GITHUB_OWNER    ""
-#define GITHUB_REPO     "Routes"
-#define GITHUB_TOKEN    ""
+#define WIFI_SSID_1     "YOUR_HOME_WIFI_NAME"
+#define WIFI_PASSWORD_1 "YOUR_HOME_WIFI_PASSWORD"
+#define WIFI_SSID_2     "YOUR_HOTSPOT_NAME"
+#define WIFI_PASSWORD_2 "YOUR_HOTSPOT_PASSWORD"
+#define GITHUB_OWNER    "YOUR_GITHUB_USERNAME"
+#define GITHUB_REPO     "YOUR_ROUTES_REPO"
+#define GITHUB_TOKEN    "YOUR_FINE_GRAINED_TOKEN"
 #define GITHUB_BRANCH   "main"
 
-// ---- touch pins + calibration (confirmed working) -----------------------
+// ---- touch pins (fixed — physical wiring, not calibration) --------------
 #define XPT2046_MOSI 32
 #define XPT2046_MISO 39
 #define XPT2046_CLK  25
 #define XPT2046_CS   33
-#define TS_MINX 250
-#define TS_MAXX 3700
-// Y range shifted down slightly from the earlier 330/3950 — the red
-// crosshair was landing a bit ABOVE the actual finger position. Both
-// bounds moved by the same amount (span unchanged) so this is a pure
-// vertical translation, not a rescale. If it's still slightly off,
-// nudge both numbers the same direction/amount again.
-#define TS_MINY 180
-#define TS_MAXY 3800
+// Calibration range (calXMin/calXMax/calYMin/calYMax) is no longer a
+// compile-time constant — see globals below. It's now runtime-
+// adjustable and persisted via Preferences, so each physical unit
+// (yours, a buddy's) can have its own correct values instead of
+// everyone inheriting whatever your specific panel needed.
 
 // ---- backlight — confirmed GPIO21, HIGH=on, against three independent
 // sources for this exact board (not guessed).
@@ -119,6 +115,14 @@ struct Cue {
   float lat;
   float lon;
 };
+// ---- UI mode — declared FIRST among the globals, since several other
+// globals below (calibReturnMode) reference it. A variable referencing
+// an enum declared later in the file was exactly the ordering bug
+// caught twice earlier tonight — this avoids it structurally rather
+// than by remembering to order things correctly by hand.
+enum AppMode { MODE_CUE, MODE_OPTIONS, MODE_PICKER, MODE_QR, MODE_SETUP, MODE_CALIBRATE };
+AppMode mode = MODE_CUE;
+
 Cue route[MAX_CUES];
 int ROUTE_LEN = 0;
 const char* ROUTE_NAME = "Loading...";
@@ -128,6 +132,27 @@ float offsetMi = 0;
 // ---- persisted settings (loaded in setup(), saved on change) ------------
 int sleepTimeoutSec = 30;
 bool useGoogleMaps = false;
+
+// ---- touch calibration — runtime + persisted (was compile-time
+// constants). Defaults are your last known-good hand-calibrated
+// values, used only until a real calibration is saved for THIS unit.
+int calXMin = 250, calXMax = 3700, calYMin = 180, calYMax = 3800;
+
+// ---- on-device calibration flow state -------------------------------
+int calibStep = 0;          // 0 = waiting for first target, 1 = second
+int calibRawX1 = 0, calibRawY1 = 0; // first tap's raw reading
+AppMode calibReturnMode = MODE_CUE; // where to go after finishing —
+                                     // MODE_CUE on a fresh unit's
+                                     // auto-run, MODE_SETUP if launched
+                                     // manually from the Setup screen
+#define CAL_MARGIN_PX 100 // outward margin beyond the measured taps —
+                           // same principle as every manual calibration
+                           // pass tonight: a real tap lands a bit short
+                           // of the true physical edge
+#define CAL_PT1_X 24
+#define CAL_PT1_Y 24
+#define CAL_PT2_X 296
+#define CAL_PT2_Y 216
 
 // ---- sleep/wake state -----------------------------------------------------
 bool asleep = false;
@@ -150,10 +175,6 @@ int lockedYRaw = 0;
 const unsigned long LONG_PRESS_MS = 600;
 const unsigned long MIN_PRESS_MS = 45;
 const unsigned long SETTLE_MS = 25;
-
-// ---- UI mode ---------------------------------------------------------------
-enum AppMode { MODE_CUE, MODE_OPTIONS, MODE_PICKER, MODE_QR, MODE_SETUP };
-AppMode mode = MODE_CUE;
 
 // ---- route picker: one level of folder browsing + scroll ----------------
 struct PickerEntry {
@@ -1002,10 +1023,10 @@ void drawSetupMenu() {
   snprintf(line0, sizeof(line0), "Sleep: %ds", sleepTimeoutSec);
   char line1[32];
   snprintf(line1, sizeof(line1), "Maps: %s", useGoogleMaps ? "Google" : "Apple");
-  const char* labels[3] = { line0, line1, "Back" };
-  for (int i = 0; i < 3; i++) {
+  const char* labels[4] = { line0, line1, "Calibrate Touch", "Back" };
+  for (int i = 0; i < 4; i++) {
     int y = SETUP_ROW_TOP + i * SETUP_ROW_H;
-    uint16_t c = (i == 2) ? ACCENT : INK;
+    uint16_t c = (i == 3) ? ACCENT : INK;
     tft.drawRect(10, y, 300, SETUP_ROW_H - 6, c);
     tft.setTextColor(c, PAPER);
     tft.setTextDatum(ML_DATUM);
@@ -1014,8 +1035,68 @@ void drawSetupMenu() {
   tft.setTextDatum(TL_DATUM);
 }
 
+// ---- on-device touch calibration: tap two diagonal targets, raw
+// readings recorded directly (NOT mapped through calXMin/etc — those
+// are exactly what's being determined, so calibration mode
+// deliberately bypasses the normal coordinate pipeline entirely
+// rather than depending on it). A fixed outward margin is applied
+// after the two taps, same principle as every manual calibration
+// pass tonight: a real tap consistently lands a bit short of the
+// true physical edge.
+void drawCalibrateScreen(int step) {
+  tft.fillScreen(PAPER);
+  tft.setFreeFont(&FreeSansBold9pt7b);
+  tft.setTextColor(INK, PAPER);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(step == 0 ? "Tap the target (1 of 2)" : "Tap the target (2 of 2)", 160, 120);
+  tft.setTextDatum(TL_DATUM);
+
+  int tx = (step == 0) ? CAL_PT1_X : CAL_PT2_X;
+  int ty = (step == 0) ? CAL_PT1_Y : CAL_PT2_Y;
+  tft.drawCircle(tx, ty, 12, ACCENT);
+  tft.drawLine(tx - 16, ty, tx + 16, ty, ACCENT);
+  tft.drawLine(tx, ty - 16, tx, ty + 16, ACCENT);
+}
+
+void handleCalibrateTap() {
+  if (calibStep == 0) {
+    calibRawX1 = lockedXRaw;
+    calibRawY1 = lockedYRaw;
+    calibStep = 1;
+    drawCalibrateScreen(1);
+    return;
+  }
+
+  int rawX2 = lockedXRaw;
+  int rawY2 = lockedYRaw;
+
+  calXMin = min(calibRawX1, rawX2) - CAL_MARGIN_PX;
+  calXMax = max(calibRawX1, rawX2) + CAL_MARGIN_PX;
+  calYMin = min(calibRawY1, rawY2) - CAL_MARGIN_PX;
+  calYMax = max(calibRawY1, rawY2) + CAL_MARGIN_PX;
+
+  prefs.putInt("calXMin", calXMin);
+  prefs.putInt("calXMax", calXMax);
+  prefs.putInt("calYMin", calYMin);
+  prefs.putInt("calYMax", calYMax);
+  prefs.putBool("calDone", true);
+
+  Serial.print("Calibration saved: X[");
+  Serial.print(calXMin); Serial.print(","); Serial.print(calXMax);
+  Serial.print("]  Y[");
+  Serial.print(calYMin); Serial.print(","); Serial.print(calYMax);
+  Serial.println("]");
+
+  showBanner("Calibration saved");
+  delay(1200);
+  calibStep = 0;
+  mode = calibReturnMode;
+  if (mode == MODE_SETUP) drawSetupMenu();
+  else drawCue(idx);
+}
+
 void handleSetupTap(int sy) {
-  int row = hitRow(sy, SETUP_ROW_TOP, SETUP_ROW_H, 3);
+  int row = hitRow(sy, SETUP_ROW_TOP, SETUP_ROW_H, 4);
   Serial.print("Setup tap row=");
   Serial.println(row);
   if (row == 0) {
@@ -1030,6 +1111,11 @@ void handleSetupTap(int sy) {
     prefs.putBool("useGoogle", useGoogleMaps);
     drawSetupMenu();
   } else if (row == 2) {
+    calibReturnMode = MODE_SETUP;
+    calibStep = 0;
+    mode = MODE_CALIBRATE;
+    drawCalibrateScreen(0);
+  } else if (row == 3) {
     mode = MODE_OPTIONS;
     drawOptionsMenu();
   }
@@ -1093,10 +1179,17 @@ void setup() {
   prefs.begin("rollchart", false);
   sleepTimeoutSec = prefs.getInt("sleepSec", 30);
   useGoogleMaps = prefs.getBool("useGoogle", false);
+  bool calDone = prefs.getBool("calDone", false);
+  calXMin = prefs.getInt("calXMin", calXMin);
+  calXMax = prefs.getInt("calXMax", calXMax);
+  calYMin = prefs.getInt("calYMin", calYMin);
+  calYMax = prefs.getInt("calYMax", calYMax);
   Serial.print("Loaded settings: sleep=");
   Serial.print(sleepTimeoutSec);
   Serial.print("s  maps=");
-  Serial.println(useGoogleMaps ? "Google" : "Apple");
+  Serial.print(useGoogleMaps ? "Google" : "Apple");
+  Serial.print("  calDone=");
+  Serial.println(calDone ? "yes" : "no");
 
   pinMode(TFT_BL_PIN, OUTPUT);
   digitalWrite(TFT_BL_PIN, HIGH);
@@ -1113,7 +1206,19 @@ void setup() {
   tft.setRotation(1);
   touch.begin();
   lastActivityMs = millis();
-  drawCue(idx);
+
+  if (!calDone) {
+    // Genuinely fresh unit — no saved calibration at all. Goes
+    // straight into the calibration flow instead of trusting
+    // whatever numbers happen to be compiled in for a screen that
+    // was never actually calibrated for THIS panel.
+    calibReturnMode = MODE_CUE;
+    calibStep = 0;
+    mode = MODE_CALIBRATE;
+    drawCalibrateScreen(0);
+  } else {
+    drawCue(idx);
+  }
 
   // WiFi stays OFF until Sync Now is tapped — see syncRoutes().
 }
@@ -1160,8 +1265,8 @@ void loop() {
     unsigned long heldFor = millis() - pressStart;
     pressActive = false;
     if (!wokeThisPress && !longPressFired && heldFor >= MIN_PRESS_MS) {
-      int sx = constrain(map(lockedXRaw, TS_MINX, TS_MAXX, 0, 320), 0, 319);
-      int sy = constrain(map(lockedYRaw, TS_MINY, TS_MAXY, 0, 240), 0, 239);
+      int sx = constrain(map(lockedXRaw, calXMin, calXMax, 0, 320), 0, 319);
+      int sy = constrain(map(lockedYRaw, calYMin, calYMax, 0, 240), 0, 239);
 
       if (mode == MODE_CUE) {
         float fx = sx / 320.0;
@@ -1182,6 +1287,13 @@ void loop() {
       } else if (mode == MODE_QR) {
         mode = MODE_CUE;
         drawCue(idx);
+      } else if (mode == MODE_CALIBRATE) {
+        // No crosshair-at-computed-position here on purpose — sx/sy
+        // above are meaningless during calibration (they're computed
+        // from the very values this mode is in the middle of
+        // determining). handleCalibrateTap() reads lockedXRaw/
+        // lockedYRaw directly instead.
+        handleCalibrateTap();
       }
     }
   }
