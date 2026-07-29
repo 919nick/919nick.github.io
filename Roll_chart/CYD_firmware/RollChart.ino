@@ -77,6 +77,7 @@
 #define GITHUB_TOKEN    "YOUR_FINE_GRAINED_TOKEN"
 #define GITHUB_BRANCH   "main"
 
+
 // ---- touch pins (fixed — physical wiring, not calibration) --------------
 #define XPT2046_MOSI 32
 #define XPT2046_MISO 39
@@ -429,6 +430,18 @@ void showBanner(const char* line1) {
 bool tryWiFiNetwork(const char* ssid, const char* password, unsigned long timeoutMs) {
   Serial.print("Connecting to WiFi: ");
   Serial.println(ssid);
+
+  // Fully reset the driver's internal state before each attempt. A
+  // failed/timed-out PREVIOUS attempt can leave the ESP32's WiFi
+  // driver still internally "connecting" even after our own timeout
+  // gives up waiting on it — the next WiFi.begin() then gets
+  // rejected at the driver level ("sta is connecting, cannot set
+  // config") before it ever really tries the new network. This is a
+  // well-documented ESP32 driver quirk, not specific to this SSID —
+  // confirmed against multiple independent reports, same fix each
+  // time: disconnect + brief settle before every begin().
+  WiFi.disconnect(true);
+  delay(200);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
