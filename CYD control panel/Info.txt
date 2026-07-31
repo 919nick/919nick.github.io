@@ -1,0 +1,17 @@
+CYD CONTROL PANEL - OVERVIEW
+
+WHAT IT DOES
+- Shows the time and current weather on the home screen
+- Keeps your work PC awake automatically, with an on/off button and a set end time
+- Custom buttons that type shortcuts or phrases for you
+- Warns you if your internet goes down
+- Watches a few VMs and shows if any are offline
+- Has its own web page for adding/editing the custom buttons and VM list
+
+
+LIBRARIES NEEDED (install via Arduino IDE Library Manager)
+- TFT_eSPI
+- XPT2046_Bitbang
+- ESP32 BLE Keyboard (by T-vK)
+- ArduinoJson
+- ESP32Ping (by marian-craciunescu)
