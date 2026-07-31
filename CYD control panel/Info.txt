@@ -3,10 +3,10 @@ CYD CONTROL PANEL - OVERVIEW
 WHAT IT DOES
 - Shows the time and current weather on the home screen
 - Keeps your work PC awake automatically, with an on/off button and a set end time
-- Custom buttons that type shortcuts or phrases for you
+- Custom buttons that type shortcuts or phrases for you (keyboard marcros - up to 6)
 - Warns you if your internet goes down
-- Watches a few VMs and shows if any are offline
-- Has its own web page for adding/editing the custom buttons and VM list
+- Watches up to four IP addresses and shows if any are offline
+- Has its own web page for adding/editing the custom buttons and IP list
 
 
 LIBRARIES NEEDED (install via Arduino IDE Library Manager)
